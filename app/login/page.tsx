@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { LockKeyhole, ShieldCheck } from "lucide-react";
 
 const AUTH_KEY = "healthintel.auth.v1";
@@ -9,16 +9,9 @@ const AUTH_KEY = "healthintel.auth.v1";
 export default function LoginRoute() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const nextPath = searchParams.get("next") || "/";
+  const nextPath = searchParams.get("next") || "/dashboard";
   const [email, setEmail] = useState("reviewer@healthintel.local");
   const [role, setRole] = useState("Medical Director");
-
-  useEffect(() => {
-    const savedUser = window.localStorage.getItem(AUTH_KEY);
-    if (savedUser) {
-      router.replace(nextPath);
-    }
-  }, [nextPath, router]);
 
   function submitLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

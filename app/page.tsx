@@ -1,5 +1,5 @@
-import { HealthIntelWorkspace } from "@/components/healthintel-workspace";
+import { redirect } from "next/navigation";
 
-export default function DashboardRoute() {
-  return <HealthIntelWorkspace view="dashboard" />;
+export default function RootRoute() {
+  redirect("/login");
 }

@@ -336,7 +336,7 @@ function Header({
   user: DemoUser | null;
 }) {
   const navItems = [
-    { href: "/", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/appeals", label: "Appeals", icon: FileText },
     { href: "/policies", label: "Policies", icon: ShieldCheck }
   ];
@@ -396,7 +396,7 @@ function Header({
         {navItems.map((item) => {
           const Icon = item.icon;
           const active =
-            item.href === "/"
+            item.href === "/dashboard"
               ? activePath === item.href
               : activePath.startsWith(item.href);
 
