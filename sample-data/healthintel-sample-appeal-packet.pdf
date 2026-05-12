@@ -1,0 +1,174 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1095 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 740 Td
+(HealthIntel Synthetic Appeal Packet - For Demo Testing Only) Tj
+T*
+(Case ID: HI-DEMO-24017) Tj
+T*
+(Member: Jordan Rivera, DOB 1978-04-19, Member ID M-3948201) Tj
+T*
+(Plan: Commercial PPO) Tj
+T*
+(Request Type: Expedited appeal for prior authorization denial) Tj
+T*
+(Service Requested: MRI lumbar spine without contrast) Tj
+T*
+(Appeal Category: Medical necessity) Tj
+T*
+(Urgency: Expedited review requested because severe radicular pain limits ambulation and) Tj
+T*
+(sleep.) Tj
+T*
+(Deadline Note: Provider asks for response within 72 hours.) Tj
+T*
+(Treating Provider: Maya Patel, MD, Orthopedic Spine) Tj
+T*
+(Diagnosis: Lumbar radiculopathy, suspected L4-L5 disc herniation, worsening left leg) Tj
+T*
+(weakness.) Tj
+T*
+(Initial Denial Rationale: Plan denied imaging because documentation did not clearly show) Tj
+T*
+(six weeks of conservative therapy or progressive neurologic deficit.) Tj
+T*
+(Provider Appeal Argument: Imaging is medically necessary due to persistent neurologic) Tj
+T*
+(symptoms, failed conservative therapy, and new objective motor weakness.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 1313 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 740 Td
+(Clinical Timeline) Tj
+T*
+() Tj
+T*
+(2026-02-03: Member developed low back pain radiating to left leg after lifting at work.) Tj
+T*
+(2026-02-08: Primary care visit documented positive straight-leg raise, pain score 8/10,) Tj
+T*
+(ibuprofen and activity modification started.) Tj
+T*
+(2026-02-16: Physical therapy initiated. Home exercise program documented.) Tj
+T*
+(2026-03-05: Follow-up documented persistent radicular pain despite NSAIDs, muscle) Tj
+T*
+(relaxant, heat, and PT.) Tj
+T*
+(2026-03-19: Physical therapy progress note reports limited improvement after seven) Tj
+T*
+(visits.) Tj
+T*
+(2026-03-27: Orthopedic consult documented reduced left ankle dorsiflexion strength 4/5) Tj
+T*
+(and numbness in L5 distribution.) Tj
+T*
+(2026-04-01: MRI requested to evaluate suspected nerve root compression and guide) Tj
+T*
+(possible epidural steroid injection or surgical referral.) Tj
+T*
+(Evidence Submitted: office notes, PT notes, medication list, pain scale, neuro exam,) Tj
+T*
+(denial letter, and provider appeal letter.) Tj
+T*
+(Conservative Therapy Completed: NSAIDs, muscle relaxant, formal PT, activity) Tj
+T*
+(modification, home exercise program.) Tj
+T*
+(Potential Documentation Gap: PT note count is present, but total duration could be) Tj
+T*
+(clearer in the appeal packet.) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 1308 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 740 Td
+(Clinical Evidence Summary) Tj
+T*
+() Tj
+T*
+(Positive support for approval: persistent radicular symptoms greater than six weeks,) Tj
+T*
+(failed conservative therapy, objective motor weakness, sensory deficit, and treatment) Tj
+T*
+(planning impact.) Tj
+T*
+(Evidence against approval: payer policy requires clear conservative treatment duration,) Tj
+T*
+(and some therapy dates are fragmented across notes.) Tj
+T*
+(Guideline Signals: advanced imaging may be supported when radiculopathy persists after) Tj
+T*
+(conservative treatment or when progressive neurologic deficit is present.) Tj
+T*
+(Risk Factors: member reports worsening weakness and impaired ambulation. Case should) Tj
+T*
+(route to orthopedic spine or neurology reviewer.) Tj
+T*
+(Suggested Decision Support Output: likely approve if reviewer accepts conservative) Tj
+T*
+(therapy duration and progressive neurologic finding as documented.) Tj
+T*
+(Missing Document Candidates: full PT plan of care, complete medication trial dates,) Tj
+T*
+(prior imaging if available.) Tj
+T*
+(Draft Reviewer Note: Appeal packet contains enough clinical evidence to support) Tj
+T*
+(expedited specialist review and likely overturn of MRI denial.) Tj
+T*
+(This PDF is synthetic sample data. It does not contain real patient information.) Tj
+ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000133 00000 n 
+0000000203 00000 n 
+0000000329 00000 n 
+0000001476 00000 n 
+0000001602 00000 n 
+0000002967 00000 n 
+0000003093 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+4453
+%%EOF

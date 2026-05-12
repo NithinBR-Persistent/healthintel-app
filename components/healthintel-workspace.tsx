@@ -14,12 +14,15 @@ import {
   ClipboardCheck,
   FileSearch,
   FileText,
+  FileUp,
   Gauge,
   LayoutDashboard,
   ListChecks,
   LogOut,
   LucideIcon,
   PanelRightOpen,
+  Plus,
+  RefreshCw,
   RotateCcw,
   Route,
   ShieldCheck,
@@ -27,26 +30,38 @@ import {
   Stethoscope,
   UserRound
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AppealCase, AppealStatus, ReviewerAction } from "@/lib/cases";
 import {
-  AppealCase,
-  AppealStatus,
-  ReviewerAction,
-  cases,
-  impactMetrics,
-  quickStats
-} from "@/lib/cases";
+  API_BASE_URL,
+  applyReviewerAction,
+  checkApiHealth,
+  createAppeal,
+  generateAppealPacket,
+  listAppeals,
+  listOutboxEmails,
+  resetAppeals,
+  uploadAppealDocument,
+  type AppealDocumentPayload,
+  type CreateAppealPayload,
+  type OutboxEmail
+} from "@/lib/api";
 
-type WorkspaceView = "dashboard" | "appeals" | "case" | "policies";
+type WorkspaceView = "dashboard" | "appeals" | "case" | "intake" | "policies";
+type ApiStatus = "checking" | "connected" | "unavailable";
 
 type DemoUser = {
   email: string;
   role: string;
 };
 
-const STORAGE_KEY = "healthintel.appeals.v3";
+type IntakeFormState = Omit<CreateAppealPayload, "age"> & {
+  age: string;
+};
+
 const AUTH_KEY = "healthintel.auth.v1";
-const LEGACY_STORAGE_KEYS = [
+const WORKFLOW_STORAGE_KEYS = [
+  "healthintel.appeals.v3",
   "healthintel.appeals.v1",
   "healthintel.appeals.v2"
 ];
@@ -80,40 +95,6 @@ const statusClasses: Record<AppealStatus, string> = {
 const packetClasses = {
   Ready: "bg-emerald-50 text-emerald-700 border-emerald-200",
   Pending: "bg-slate-100 text-slate-700 border-slate-200"
-};
-
-const reviewerActionConfig: Record<
-  ReviewerAction,
-  {
-    status: AppealStatus;
-    auditLabel: string;
-    auditDetail: string;
-    summary: string;
-  }
-> = {
-  Approve: {
-    status: "Approved",
-    auditLabel: "Reviewer approved appeal",
-    auditDetail:
-      "Approval selected after reviewing the AI packet, guideline match, and supporting clinical evidence.",
-    summary: "Approval selected. The case is ready for final decision letter review."
-  },
-  "Request Info": {
-    status: "Needs info",
-    auditLabel: "Reviewer requested information",
-    auditDetail:
-      "Additional clinical documentation requested before a final determination is drafted.",
-    summary:
-      "Information request selected. The missing-document list should be sent to the provider."
-  },
-  "Draft Uphold": {
-    status: "Decision drafted",
-    auditLabel: "Uphold draft prepared",
-    auditDetail:
-      "Draft uphold action selected for reviewer validation and rationale completion.",
-    summary:
-      "Uphold draft selected. The reviewer should validate rationale before release."
-  }
 };
 
 const policyLibrary = [
@@ -161,12 +142,55 @@ export function HealthIntelWorkspace({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [appeals, setAppeals] = useState<AppealCase[]>(createInitialAppeals);
+  const [appeals, setAppeals] = useState<AppealCase[]>([]);
+  const [outboxEmails, setOutboxEmails] = useState<OutboxEmail[]>([]);
   const [generatingCaseId, setGeneratingCaseId] = useState<string | null>(null);
-  const [hasLoadedStoredState, setHasLoadedStoredState] = useState(false);
+  const [actingCaseId, setActingCaseId] = useState<string | null>(null);
+  const [isCreatingAppeal, setIsCreatingAppeal] = useState(false);
+  const [isLoadingAppeals, setIsLoadingAppeals] = useState(true);
+  const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
+  const [apiError, setApiError] = useState<string | null>(null);
   const [resetNotice, setResetNotice] = useState<string | null>(null);
   const [user, setUser] = useState<DemoUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+
+  const updateAppeal = useCallback((updatedAppeal: AppealCase) => {
+    setAppeals((currentAppeals) =>
+      currentAppeals.map((appeal) =>
+        appeal.id === updatedAppeal.id ? updatedAppeal : appeal
+      )
+    );
+  }, []);
+
+  const loadAppealsFromApi = useCallback(async ({
+    showLoading = true
+  }: { showLoading?: boolean } = {}) => {
+    if (showLoading) {
+      setIsLoadingAppeals(true);
+    }
+    if (showLoading) {
+      setApiStatus("checking");
+    }
+    setApiError(null);
+
+    try {
+      await checkApiHealth();
+      const [nextAppeals, nextOutboxEmails] = await Promise.all([
+        listAppeals(),
+        listOutboxEmails()
+      ]);
+      setAppeals(nextAppeals);
+      setOutboxEmails(nextOutboxEmails);
+      setApiStatus("connected");
+    } catch (error) {
+      setApiStatus("unavailable");
+      setApiError(getErrorMessage(error));
+    } finally {
+      if (showLoading) {
+        setIsLoadingAppeals(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -176,7 +200,13 @@ export function HealthIntelWorkspace({
         return;
       }
 
-      setUser(JSON.parse(savedUser) as DemoUser);
+      const parsedUser = JSON.parse(savedUser) as DemoUser;
+      const normalizedUser: DemoUser = {
+        email: parsedUser.email,
+        role: "Appeals Reviewer"
+      };
+      window.localStorage.setItem(AUTH_KEY, JSON.stringify(normalizedUser));
+      setUser(normalizedUser);
       setAuthChecked(true);
     } catch {
       window.localStorage.removeItem(AUTH_KEY);
@@ -185,24 +215,46 @@ export function HealthIntelWorkspace({
   }, [pathname, router]);
 
   useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as AppealCase[];
-        setAppeals(mergeAppealState(parsed));
-      }
-    } catch {
-      setAppeals(createInitialAppeals());
-    } finally {
-      setHasLoadedStoredState(true);
+    if (authChecked) {
+      void loadAppealsFromApi();
     }
-  }, []);
+  }, [authChecked, loadAppealsFromApi]);
 
   useEffect(() => {
-    if (hasLoadedStoredState) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(appeals));
+    if (!authChecked) {
+      return;
     }
-  }, [appeals, hasLoadedStoredState]);
+
+    function refreshVisibleReviewerQueue() {
+      if (document.visibilityState === "visible") {
+        void loadAppealsFromApi({ showLoading: false });
+      }
+    }
+
+    window.addEventListener("focus", refreshVisibleReviewerQueue);
+    document.addEventListener("visibilitychange", refreshVisibleReviewerQueue);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleReviewerQueue);
+      document.removeEventListener(
+        "visibilitychange",
+        refreshVisibleReviewerQueue
+      );
+    };
+  }, [authChecked, loadAppealsFromApi]);
+
+  useEffect(() => {
+    if (!authChecked) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadAppealsFromApi({ showLoading: false });
+      }
+    }, 10000);
+
+    return () => window.clearInterval(intervalId);
+  }, [authChecked, loadAppealsFromApi]);
 
   useEffect(() => {
     if (!resetNotice) {
@@ -213,65 +265,108 @@ export function HealthIntelWorkspace({
     return () => window.clearTimeout(timeoutId);
   }, [resetNotice]);
 
+  const orderedAppeals = useMemo(
+    () => [...appeals].sort(compareAppealsForReviewQueue),
+    [appeals]
+  );
+  const activeReviewerQueue = useMemo(
+    () => orderedAppeals.filter((appeal) => !appeal.reviewerDecision),
+    [orderedAppeals]
+  );
+  const trackedOutsideQueue = useMemo(
+    () => orderedAppeals.filter((appeal) => appeal.reviewerDecision),
+    [orderedAppeals]
+  );
+
   const selectedCase = useMemo(() => {
     if (!caseId) {
-      return appeals[0];
+      return orderedAppeals[0];
     }
 
     return appeals.find((appeal) => appeal.id === caseId);
-  }, [appeals, caseId]);
+  }, [appeals, caseId, orderedAppeals]);
 
-  function generatePacket(targetCaseId: string) {
+  async function generatePacket(targetCaseId: string) {
     setGeneratingCaseId(targetCaseId);
-    setAppeals((currentAppeals) =>
-      currentAppeals.map((appeal) => prepareAppealPacket(appeal, targetCaseId))
-    );
+    setApiError(null);
 
-    window.setTimeout(() => {
+    try {
+      updateAppeal(await generateAppealPacket(targetCaseId));
+      setApiStatus("connected");
+    } catch (error) {
+      setApiStatus("unavailable");
+      setApiError(getErrorMessage(error));
+    } finally {
       setGeneratingCaseId((currentCaseId) =>
         currentCaseId === targetCaseId ? null : currentCaseId
       );
-    }, 650);
+    }
   }
 
-  function resetDemoState() {
-    setAppeals(createInitialAppeals());
+  async function resetDemoState() {
     setGeneratingCaseId(null);
-    setResetNotice(`Demo state reset at ${formatNoticeTime()}`);
-    window.localStorage.removeItem(STORAGE_KEY);
-    LEGACY_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+    setActingCaseId(null);
+    setApiError(null);
+
+    try {
+      setAppeals(await resetAppeals());
+      setOutboxEmails([]);
+      setApiStatus("connected");
+      setResetNotice(`Workspace reset at ${formatNoticeTime()}`);
+      WORKFLOW_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+    } catch (error) {
+      setApiStatus("unavailable");
+      setApiError(getErrorMessage(error));
+    }
   }
 
-  function saveReviewerAction(targetCaseId: string, action: ReviewerAction) {
-    const actionConfig = reviewerActionConfig[action];
-    setAppeals((currentAppeals) =>
-      currentAppeals.map((appeal) => {
-        if (appeal.id !== targetCaseId) {
-          return appeal;
-        }
+  async function saveReviewerAction(
+    targetCaseId: string,
+    action: ReviewerAction,
+    note?: string
+  ) {
+    setActingCaseId(targetCaseId);
+    setApiError(null);
 
-        const preparedAppeal = appeal.analysisPrepared
-          ? appeal
-          : prepareAppealPacket(appeal, targetCaseId);
-        const decisionTime = formatAuditTime();
-        return {
-          ...preparedAppeal,
-          analysisPrepared: true,
-          status: actionConfig.status,
-          reviewerDecision: action,
-          decisionSummary: actionConfig.summary,
-          decisionTime,
-          audit: [
-            ...preparedAppeal.audit,
-            {
-              time: decisionTime,
-              label: actionConfig.auditLabel,
-              detail: actionConfig.auditDetail
-            }
-          ]
-        };
-      })
-    );
+    try {
+      updateAppeal(await applyReviewerAction(targetCaseId, action, note));
+      setOutboxEmails(await listOutboxEmails());
+      setApiStatus("connected");
+    } catch (error) {
+      setApiStatus("unavailable");
+      setApiError(getErrorMessage(error));
+    } finally {
+      setActingCaseId((currentCaseId) =>
+        currentCaseId === targetCaseId ? null : currentCaseId
+      );
+    }
+  }
+
+  async function createAppealFromIntake(
+    payload: CreateAppealPayload,
+    document?: AppealDocumentPayload
+  ) {
+    setIsCreatingAppeal(true);
+    setApiError(null);
+
+    try {
+      const createdAppeal = await createAppeal(payload);
+      const finalAppeal = document
+        ? await uploadAppealDocument(createdAppeal.id, document)
+        : createdAppeal;
+      setApiStatus("connected");
+
+      setAppeals((currentAppeals) => [
+        ...currentAppeals.filter((appeal) => appeal.id !== finalAppeal.id),
+        finalAppeal
+      ]);
+      router.push(`/appeals/${finalAppeal.id}`);
+    } catch (error) {
+      setApiStatus("unavailable");
+      setApiError(getErrorMessage(error));
+    } finally {
+      setIsCreatingAppeal(false);
+    }
   }
 
   function signOut() {
@@ -293,51 +388,82 @@ export function HealthIntelWorkspace({
     <main className="min-h-screen px-4 py-5 text-ink sm:px-6 lg:px-8">
       <div className="mx-auto flex max-w-[1500px] flex-col gap-5">
         <Header
+          apiStatus={apiStatus}
           activePath={pathname}
           onResetDemo={resetDemoState}
+          onRetryApi={loadAppealsFromApi}
           onSignOut={signOut}
           user={user}
         />
 
         {resetNotice ? <ResetNotice message={resetNotice} /> : null}
-
-        {view === "dashboard" ? (
-          <DashboardView appeals={appeals} onGenerate={generatePacket} />
+        {apiError ? (
+          <ApiErrorNotice message={apiError} onRetry={loadAppealsFromApi} />
         ) : null}
 
-        {view === "appeals" ? (
-          <AppealsListView appeals={appeals} onGenerate={generatePacket} />
+        {isLoadingAppeals ? <LoadingAppeals /> : null}
+
+        {!isLoadingAppeals && view === "dashboard" ? (
+          <DashboardView
+            appeals={activeReviewerQueue}
+            onGenerate={generatePacket}
+            onRefresh={() => void loadAppealsFromApi({ showLoading: false })}
+            outboxEmails={outboxEmails}
+            trackedAppeals={trackedOutsideQueue}
+          />
         ) : null}
 
-        {view === "case" ? (
+        {!isLoadingAppeals && view === "appeals" ? (
+          <AppealsListView
+            appeals={activeReviewerQueue}
+            onRefresh={() => void loadAppealsFromApi({ showLoading: false })}
+            onGenerate={generatePacket}
+          />
+        ) : null}
+
+        {!isLoadingAppeals && view === "case" ? (
           <CaseReviewView
             appeal={selectedCase}
+            isActionPending={actingCaseId === selectedCase?.id}
             isGenerating={generatingCaseId === selectedCase?.id}
             onAction={saveReviewerAction}
             onGenerate={generatePacket}
           />
         ) : null}
 
-        {view === "policies" ? <PolicyLibraryView /> : null}
+        {!isLoadingAppeals && view === "intake" ? (
+          <IntakeView
+            apiStatus={apiStatus}
+            isSubmitting={isCreatingAppeal}
+            onCreate={createAppealFromIntake}
+          />
+        ) : null}
+
+        {!isLoadingAppeals && view === "policies" ? <PolicyLibraryView /> : null}
       </div>
     </main>
   );
 }
 
 function Header({
+  apiStatus,
   activePath,
   onResetDemo,
+  onRetryApi,
   onSignOut,
   user
 }: {
+  apiStatus: ApiStatus;
   activePath: string;
   onResetDemo: () => void;
+  onRetryApi: () => void;
   onSignOut: () => void;
   user: DemoUser | null;
 }) {
   const navItems = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/appeals", label: "Appeals", icon: FileText },
+    { href: "/intake", label: "Intake", icon: Plus },
     { href: "/policies", label: "Policies", icon: ShieldCheck }
   ];
 
@@ -360,6 +486,7 @@ function Header({
 
         <div className="flex flex-col gap-2 lg:items-end">
           <div className="flex flex-wrap items-center gap-2">
+            <ApiStatusBadge status={apiStatus} onRetry={onRetryApi} />
             <span className="rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-muted">
               {user?.role ?? "Reviewer"}
             </span>
@@ -368,14 +495,24 @@ function Header({
             </span>
           </div>
           <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-            <Tooltip label="Clear generated packets, saved decisions, and demo workflow state in this browser.">
+            <Tooltip label="Reload the reviewer queue from the system.">
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-surface"
+                onClick={onRetryApi}
+                type="button"
+              >
+                <RefreshCw className="h-4 w-4 text-accent" aria-hidden="true" />
+                Refresh queue
+              </button>
+            </Tooltip>
+            <Tooltip label="Clear generated AI reviews, reviewer actions, and workspace data.">
               <button
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-surface"
                 onClick={onResetDemo}
                 type="button"
               >
                 <RotateCcw className="h-4 w-4 text-accent" aria-hidden="true" />
-                Reset demo state
+                Reset workspace
               </button>
             </Tooltip>
             <Tooltip label="Leave the local demo session and return to the login screen.">
@@ -428,84 +565,170 @@ function ResetNotice({ message }: { message: string }) {
         {message}
       </span>
       <span className="hidden text-emerald-700 sm:inline">
-        Generated AI packets, saved reviewer actions, and demo workflow state
+        Generated AI reviews, saved reviewer actions, and workspace state
         were cleared.
       </span>
     </div>
   );
 }
 
+function ApiStatusBadge({
+  onRetry,
+  status
+}: {
+  onRetry: () => void;
+  status: ApiStatus;
+}) {
+  const statusConfig = {
+    checking: {
+      className: "border-amber-200 bg-amber-50 text-amber-700",
+      icon: Clock3,
+      label: "System checking"
+    },
+    connected: {
+      className: "border-emerald-200 bg-emerald-50 text-emerald-700",
+      icon: CheckCircle2,
+      label: "System online"
+    },
+    unavailable: {
+      className: "border-red-200 bg-red-50 text-red-700",
+      icon: AlertTriangle,
+      label: "System unavailable"
+    }
+  } satisfies Record<
+    ApiStatus,
+    { className: string; icon: LucideIcon; label: string }
+  >;
+  const config = statusConfig[status];
+  const Icon = config.icon;
+
+  return (
+    <Tooltip
+      label={`Connection: ${API_BASE_URL}. Click to recheck.`}
+    >
+      <button
+        className={`inline-flex items-center justify-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:bg-white ${config.className}`}
+        onClick={onRetry}
+        type="button"
+      >
+        <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+        {config.label}
+      </button>
+    </Tooltip>
+  );
+}
+
+function ApiErrorNotice({
+  message,
+  onRetry
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 shadow-soft sm:flex-row sm:items-center sm:justify-between">
+      <span className="flex items-center gap-2 font-semibold">
+        <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+        {message}
+      </span>
+      <button
+        className="inline-flex items-center justify-center rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+        onClick={onRetry}
+        type="button"
+      >
+        Retry connection
+      </button>
+    </div>
+  );
+}
+
+function LoadingAppeals() {
+  return (
+    <div className="rounded-lg border border-border bg-panel p-6 text-sm font-semibold text-muted shadow-soft">
+      Loading appeals...
+    </div>
+  );
+}
+
 function DashboardView({
   appeals,
-  onGenerate
+  onGenerate,
+  onRefresh,
+  outboxEmails,
+  trackedAppeals
 }: {
   appeals: AppealCase[];
   onGenerate: (caseId: string) => void;
+  onRefresh: () => void;
+  outboxEmails: OutboxEmail[];
+  trackedAppeals: AppealCase[];
 }) {
   const urgentCount = appeals.filter((appeal) => appeal.urgency === "Urgent").length;
-  const generatedCount = appeals.filter((appeal) => appeal.analysisPrepared).length;
-  const pendingCount = appeals.length - generatedCount;
+  const pendingPacketCount = appeals.filter(
+    (appeal) => !appeal.analysisPrepared
+  ).length;
+  const recentlyActedAppeals = trackedAppeals.filter((appeal) =>
+    isWithinPastDays(appeal.decisionTime, 31)
+  );
 
   return (
     <section className="flex flex-col gap-5">
       <PageHeader
         eyebrow="Command Center"
-        title="Appeals operations dashboard"
-        description="Track SLA pressure, packet readiness, and high-risk appeals before reviewers open the clinical workspace."
+        title="Active appeals dashboard"
+        description="Live workload, recent decisions, and member notification activity."
       />
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {quickStats.map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <div
-              className="rounded-lg border border-border bg-panel p-4 shadow-soft transition hover:border-accent/40"
-              key={stat.label}
-            >
-              <div className="flex items-center gap-2 text-sm font-medium text-muted">
-                <Icon className="h-4 w-4 text-accent" aria-hidden="true" />
-                {stat.label}
-              </div>
-              <div className="mt-2 flex items-end justify-between gap-3">
-                <span className="text-3xl font-semibold text-ink">
-                  {stat.value}
-                </span>
-                <span className="pb-1 text-sm text-muted">{stat.trend}</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_380px]">
-        <Panel
-          title="Appeals Command Center"
-          icon={LayoutDashboard}
-          tooltip="A compact view of cases that need packet generation or reviewer attention."
-        >
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <Panel
+        title="Active review queue"
+        icon={LayoutDashboard}
+        tooltip="Cases that still need reviewer action. Counts are calculated from the current system response."
+      >
+        <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             <DashboardMetric
-              detail="Cases with a 72-hour decision window."
+              detail="Cases currently visible in the reviewer queue."
+              icon={FileText}
+              label="Active cases"
+              value={appeals.length.toString()}
+            />
+            <DashboardMetric
+              detail="Active cases with a 72-hour decision window."
               icon={Clock3}
-              label="Urgent cases"
+              label="Urgent"
               value={urgentCount.toString()}
             />
             <DashboardMetric
-              detail="Cases where HealthIntel has generated the reviewer packet."
-              icon={Sparkles}
-              label="AI packets ready"
-              value={generatedCount.toString()}
+              detail="Active cases still waiting for AI extraction and evidence mapping."
+              icon={FileSearch}
+              label="Awaiting AI Review"
+              value={pendingPacketCount.toString()}
             />
             <DashboardMetric
-              detail="Cases still waiting for AI extraction and evidence mapping."
-              icon={FileSearch}
-              label="Pending packets"
-              value={pendingCount.toString()}
+              detail="Appeals with a saved reviewer action in the last 31 days."
+              icon={ListChecks}
+              label="Acted this month"
+              value={recentlyActedAppeals.length.toString()}
             />
           </div>
 
-          <div className="mt-4 flex flex-col gap-3">
-            {appeals.map((appeal) => (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm font-semibold text-muted">
+                Active reviewer queue:{" "}
+                <span className="text-ink">{appeals.length}</span>
+              </p>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-panel"
+                onClick={onRefresh}
+                type="button"
+              >
+                <RefreshCw className="h-4 w-4 text-accent" aria-hidden="true" />
+                Refresh queue
+              </button>
+            </div>
+            {appeals.length ? (
+              appeals.map((appeal) => (
               <div
                 className="flex flex-col gap-3 rounded-lg border border-border bg-white p-3 transition hover:border-accent/40 hover:shadow-sm md:flex-row md:items-center md:justify-between"
                 key={appeal.id}
@@ -519,12 +742,19 @@ function DashboardView({
                     <Badge className={riskClasses[appeal.risk]}>
                       {appeal.risk} risk
                     </Badge>
+                    {appeal.source === "Member portal" ? (
+                      <Badge className="border-cyan-200 bg-cyan-50 text-cyan-700">
+                        Member submitted
+                      </Badge>
+                    ) : null}
                   </div>
                   <h2 className="mt-2 text-base font-semibold text-ink">
                     {appeal.service}
                   </h2>
                   <p className="mt-1 text-sm text-muted">
-                    {appeal.member}, {appeal.age} - {appeal.slaLabel}
+                    {appeal.member}, {appeal.age}
+                    {appeal.policyNumber ? ` - ${appeal.policyNumber}` : ""} -{" "}
+                    {appeal.slaLabel}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -536,12 +766,12 @@ function DashboardView({
                         type="button"
                       >
                         <Sparkles className="h-4 w-4" aria-hidden="true" />
-                        Generate
+                        Generate AI review
                       </button>
                     </Tooltip>
                   ) : (
                     <Badge className="border-emerald-200 bg-emerald-50 text-emerald-700">
-                      Packet ready
+                      AI review ready
                     </Badge>
                   )}
                   <Link
@@ -553,11 +783,120 @@ function DashboardView({
                   </Link>
                 </div>
               </div>
-            ))}
+              ))
+            ) : (
+              <div className="rounded-lg border border-border bg-white p-4 text-sm font-semibold text-muted">
+                No active reviewer cases. New submissions or follow-up documents
+                will appear here.
+              </div>
+            )}
+          </div>
+        </div>
+      </Panel>
+
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <Panel
+          title="Decisions this month"
+          icon={ListChecks}
+          tooltip="Appeals with saved reviewer actions in the last 31 days. Fresh follow-up documents move cases back into the active queue."
+        >
+          <div className="grid grid-cols-1 gap-3">
+            {recentlyActedAppeals.length ? (
+              recentlyActedAppeals.slice(0, 5).map((appeal) => (
+                <div
+                  className="flex flex-col gap-3 rounded-lg border border-border bg-white p-3 sm:flex-row sm:items-center sm:justify-between"
+                  key={appeal.id}
+                >
+                  <div>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge>{appeal.id}</Badge>
+                      <Badge className={statusClasses[appeal.status]}>
+                        {appeal.status}
+                      </Badge>
+                      {appeal.source === "Member portal" ? (
+                        <Badge className="border-cyan-200 bg-cyan-50 text-cyan-700">
+                          Member submitted
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <p className="mt-2 text-sm font-semibold text-ink">
+                      {appeal.member} - {appeal.service}
+                    </p>
+                    <p className="mt-1 text-xs font-medium text-muted">
+                      Reviewer action:{" "}
+                      {appeal.reviewerDecision
+                        ? formatRecommendationAction(appeal.reviewerDecision)
+                        : "Saved"}
+                    </p>
+                  </div>
+                  <Link
+                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-surface"
+                    href={`/appeals/${appeal.id}`}
+                  >
+                    View case
+                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  </Link>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-lg border border-border bg-white p-4 text-sm font-semibold text-muted">
+                No reviewer actions recorded in the last month.
+              </div>
+            )}
           </div>
         </Panel>
 
-        <ExecutiveDashboard />
+        <Panel
+          title="Member notifications"
+          icon={FileText}
+          tooltip="Member status notifications queued by reviewer actions."
+        >
+          <div className="grid grid-cols-1 gap-3">
+            {outboxEmails.length ? (
+              outboxEmails.slice(0, 5).map((email) => (
+                <details
+                  className="rounded-lg border border-border bg-white p-3"
+                  key={email.id}
+                >
+                  <summary className="cursor-pointer list-none">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge className="border-emerald-200 bg-emerald-50 text-emerald-700">
+                            Queued
+                          </Badge>
+                          <Badge>{email.id}</Badge>
+                          <Badge>{email.status}</Badge>
+                        </div>
+                        <p className="mt-2 text-sm font-semibold text-ink">
+                          {email.subject}
+                        </p>
+                        <p className="mt-1 text-xs font-medium text-muted">
+                          To {email.to} - Tracking {email.trackingId}
+                        </p>
+                      </div>
+                      <Link
+                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-surface"
+                        href={`/appeals/${email.appealId}`}
+                      >
+                        View case
+                        <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                      </Link>
+                    </div>
+                  </summary>
+                  <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-border bg-surface p-3 text-xs leading-5 text-slate-700">
+                    {email.body}
+                  </pre>
+                </details>
+              ))
+            ) : (
+              <div className="rounded-lg border border-border bg-white p-4 text-sm font-semibold text-muted">
+                No member notifications queued yet. Notifications appear here after
+                reviewer actions.
+              </div>
+            )}
+          </div>
+        </Panel>
       </div>
     </section>
   );
@@ -565,22 +904,44 @@ function DashboardView({
 
 function AppealsListView({
   appeals,
-  onGenerate
+  onGenerate,
+  onRefresh
 }: {
   appeals: AppealCase[];
   onGenerate: (caseId: string) => void;
+  onRefresh: () => void;
 }) {
   return (
     <section className="flex flex-col gap-5">
       <PageHeader
         eyebrow="Work Queue"
         title="Appeals needing review"
-        description="Prioritize by SLA, risk, packet readiness, and specialty routing before opening the clinical workspace."
+        description="Prioritize by SLA, risk, AI review readiness, and specialty routing before opening the clinical workspace."
       />
+
+      <div className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4 shadow-soft sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-ink">
+            {appeals.length} active reviewer cases
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            Member submissions appear here while they still need reviewer action.
+          </p>
+        </div>
+        <button
+          className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:bg-surface"
+          onClick={onRefresh}
+          type="button"
+        >
+          <RefreshCw className="h-4 w-4 text-accent" aria-hidden="true" />
+          Refresh queue
+        </button>
+      </div>
 
       <div className="rounded-lg border border-border bg-panel p-4 shadow-soft">
         <div className="grid grid-cols-1 gap-3">
-          {appeals.map((appeal) => (
+          {appeals.length ? (
+            appeals.map((appeal) => (
             <div
               className="grid gap-3 rounded-lg border border-border bg-white p-4 transition hover:border-accent/40 hover:shadow-sm lg:grid-cols-[1.4fr_0.9fr_0.8fr_auto]"
               key={appeal.id}
@@ -593,6 +954,11 @@ function AppealsListView({
               <p className="mt-1 text-sm text-muted">
                 {appeal.member}, {appeal.age} - {appeal.provider}
               </p>
+              {appeal.policyNumber ? (
+                <p className="mt-1 text-xs font-semibold text-muted">
+                  Policy {appeal.policyNumber}
+                </p>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap items-start gap-2">
@@ -607,6 +973,11 @@ function AppealsListView({
                   {appeal.status}
                 </Badge>
               </Tooltip>
+              {appeal.source === "Member portal" ? (
+                <Badge className="border-cyan-200 bg-cyan-50 text-cyan-700">
+                  Member submitted
+                </Badge>
+              ) : null}
             </div>
 
             <div className="text-sm text-muted">
@@ -615,7 +986,7 @@ function AppealsListView({
                 <Clock3 className="h-3.5 w-3.5 text-accent" aria-hidden="true" />
                 {appeal.slaLabel}
               </p>
-              <Tooltip label="Whether the demo AI packet has been generated for the case.">
+              <Tooltip label="Whether AI extraction and evidence mapping have been generated for the case.">
                 <Badge
                   className={
                     appeal.analysisPrepared
@@ -623,7 +994,9 @@ function AppealsListView({
                       : packetClasses.Pending
                   }
                 >
-                  {appeal.analysisPrepared ? "Packet ready" : "Packet pending"}
+                  {appeal.analysisPrepared
+                    ? "AI review ready"
+                    : "Awaiting AI review"}
                 </Badge>
               </Tooltip>
             </div>
@@ -637,7 +1010,7 @@ function AppealsListView({
                     type="button"
                   >
                     <Sparkles className="h-4 w-4" aria-hidden="true" />
-                    Generate
+                    Generate AI review
                   </button>
                 </Tooltip>
               ) : null}
@@ -650,7 +1023,13 @@ function AppealsListView({
               </Link>
             </div>
           </div>
-          ))}
+            ))
+          ) : (
+            <div className="rounded-lg border border-border bg-white p-6 text-sm font-semibold text-muted">
+              No active reviewer cases. Decided appeals stay out of the work
+              queue unless fresh documents reopen them.
+            </div>
+          )}
         </div>
       </div>
     </section>
@@ -659,20 +1038,22 @@ function AppealsListView({
 
 function CaseReviewView({
   appeal,
+  isActionPending,
   isGenerating,
   onAction,
   onGenerate
 }: {
   appeal?: AppealCase;
+  isActionPending: boolean;
   isGenerating: boolean;
-  onAction: (caseId: string, action: ReviewerAction) => void;
+  onAction: (caseId: string, action: ReviewerAction, note?: string) => void;
   onGenerate: (caseId: string) => void;
 }) {
   if (!appeal) {
     return (
-      <Panel title="Appeal Not Found" icon={AlertTriangle}>
+      <Panel title="Appeal not found" icon={AlertTriangle}>
         <p className="text-sm leading-6 text-muted">
-          The requested appeal could not be found in the demo dataset.
+          The requested appeal could not be found in the workspace data.
         </p>
         <Link
           className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white"
@@ -712,6 +1093,11 @@ function CaseReviewView({
               </Tooltip>
               <Badge className={riskClasses[appeal.risk]}>{appeal.risk} risk</Badge>
               <Badge>{appeal.specialty}</Badge>
+              {appeal.source === "Member portal" ? (
+                <Badge className="border-cyan-200 bg-cyan-50 text-cyan-700">
+                  Member submitted
+                </Badge>
+              ) : null}
             </div>
             <h2 className="mt-3 text-2xl font-semibold tracking-normal text-ink">
               {appeal.service}
@@ -739,6 +1125,9 @@ function CaseReviewView({
       </div>
 
       <CaseSnapshot appeal={appeal} />
+      {appeal.documents?.length ? (
+        <DocumentStrip documents={appeal.documents} />
+      ) : null}
 
       {analysisReady ? (
         <div className="flex items-center gap-2 rounded-lg border border-accent/30 bg-[#eefaf9] px-4 py-3 text-sm font-semibold text-accent shadow-soft">
@@ -748,8 +1137,8 @@ function CaseReviewView({
             <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
           )}
           {isGenerating
-            ? "Refreshing AI review packet..."
-            : "AI review packet ready"}
+            ? "Refreshing AI review..."
+            : "AI review ready"}
         </div>
       ) : null}
 
@@ -768,8 +1157,9 @@ function CaseReviewView({
         <DecisionPanel
           appeal={appeal}
           analysisReady={analysisReady}
+          isActionPending={isActionPending}
           isGenerating={isGenerating}
-          onAction={(action) => onAction(appeal.id, action)}
+          onAction={(action, note) => onAction(appeal.id, action, note)}
           onGenerate={() => onGenerate(appeal.id)}
         />
       </div>
@@ -778,15 +1168,34 @@ function CaseReviewView({
 }
 
 function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
+  const sourceSignals = getDocumentSignals(appeal);
+
   return (
     <>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <Panel
-          title="AI Case Brief"
+          title="AI case brief"
           icon={Bot}
-          tooltip="Concise reviewer-oriented summary generated from the appeal packet."
+          tooltip="Concise reviewer-oriented summary generated from the appeal documents."
         >
           <p className="text-sm leading-6 text-slate-700">{appeal.aiBrief}</p>
+          {sourceSignals.length ? (
+            <div className="mt-4 rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.15em] text-cyan-700">
+                PDF Signals Used
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {sourceSignals.map((signal) => (
+                  <Badge
+                    className="border-cyan-200 bg-white text-cyan-700"
+                    key={signal}
+                  >
+                    {signal}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="mt-4 rounded-lg border border-border bg-surface p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted">
               Provider Appeal Argument
@@ -798,7 +1207,7 @@ function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
         </Panel>
 
         <Panel
-          title="Extracted Clinical Facts"
+          title="Extracted clinical facts"
           icon={FileSearch}
           tooltip="Structured clinical facts pulled out of the source appeal material."
         >
@@ -808,7 +1217,7 @@ function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Panel
-          title="Clinical Timeline"
+          title="Clinical timeline"
           icon={ListChecks}
           tooltip="Chronological reconstruction of symptoms, treatment, and appeal events."
         >
@@ -816,9 +1225,9 @@ function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
         </Panel>
 
         <Panel
-          title="Guideline Match"
+          title="Guideline match"
           icon={ShieldCheck}
-          tooltip="Mock policy criteria mapped to available clinical evidence."
+        tooltip="Policy criteria mapped to available clinical evidence."
         >
           <div className="flex flex-col gap-2">
             {appeal.guideline.map((criterion) => (
@@ -842,12 +1251,12 @@ function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
         <EvidencePanel
           icon={CheckCircle2}
           items={appeal.approvalEvidence}
-          title="Evidence Supporting Approval"
+          title="Evidence supporting approval"
         />
         <EvidencePanel
           icon={AlertTriangle}
           items={appeal.denialEvidence}
-          title="Evidence Supporting Denial"
+          title="Evidence supporting denial"
         />
       </div>
     </>
@@ -855,15 +1264,18 @@ function CaseAnalysis({ appeal }: { appeal: AppealCase }) {
 }
 
 function CaseSnapshot({ appeal }: { appeal: AppealCase }) {
-  const packetLabel = appeal.analysisPrepared ? "Ready" : "Pending";
+  const packetLabel = appeal.analysisPrepared ? "Ready" : "Not generated";
+  const documentCount = appeal.documents?.length ?? 0;
 
   return (
-    <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
       <SnapshotTile
-        detail="Member and plan context used to orient the appeal packet."
+        detail="Member and plan context used to orient the appeal review."
         icon={UserRound}
         label="Member"
-        value={`${appeal.member}, ${appeal.age}`}
+        value={`${appeal.member}, ${appeal.age}${
+          appeal.policyNumber ? ` / ${appeal.policyNumber}` : ""
+        }`}
       />
       <SnapshotTile
         detail="Suggested clinical reviewer based on service category and complexity."
@@ -878,12 +1290,93 @@ function CaseSnapshot({ appeal }: { appeal: AppealCase }) {
         value={appeal.slaLabel}
       />
       <SnapshotTile
-        detail="AI packet availability for case brief, facts, evidence, and recommendation."
+        detail="Source documents attached through appeal intake."
+        icon={FileUp}
+        label="Documents"
+        value={`${documentCount} uploaded`}
+      />
+      <SnapshotTile
+        detail="AI review availability for case brief, facts, evidence, and recommendation."
         icon={Gauge}
-        label="Packet"
+        label="AI review"
         value={packetLabel}
       />
     </section>
+  );
+}
+
+function DocumentStrip({
+  documents
+}: {
+  documents: NonNullable<AppealCase["documents"]>;
+}) {
+  return (
+    <Panel
+      title="Source Document Evidence"
+      icon={FileUp}
+      tooltip="PDF evidence attached during intake and signals extracted for reviewer validation."
+    >
+      <div
+        className={`grid grid-cols-1 gap-3 ${
+          documents.length > 1 ? "xl:grid-cols-2" : ""
+        }`}
+      >
+        {documents.map((document) => (
+          <div
+            className="rounded-lg border border-border bg-surface p-3"
+            key={document.id}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-ink">
+                  {document.fileName}
+                </p>
+                <p className="mt-1 text-xs font-medium text-muted">
+                  {formatFileSize(document.fileSize)} - {document.uploadedAt}
+                </p>
+              </div>
+              <Badge className="border-accent/30 bg-[#eefaf9] text-accent">
+                {formatExtractionMode(document.extractionMode)}
+              </Badge>
+            </div>
+            <p className="mt-2 text-sm leading-5 text-slate-700">
+              {document.summary}
+            </p>
+            {document.llmSummary && document.llmSummary !== document.summary ? (
+              <p className="mt-2 rounded-lg border border-cyan-200 bg-cyan-50 p-2 text-xs leading-5 text-cyan-800">
+                {document.llmSummary}
+              </p>
+            ) : null}
+            {document.extractionSignals?.length ? (
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+                  Extracted Signals
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {document.extractionSignals.map((signal) => (
+                    <Badge
+                      className="border-cyan-200 bg-cyan-50 text-cyan-700"
+                      key={signal}
+                    >
+                      {signal}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs font-semibold text-muted">
+                No text signals were available from this PDF.
+              </p>
+            )}
+            {document.contentPreview ? (
+              <p className="mt-3 rounded-lg border border-border bg-white p-2 text-xs leading-5 text-muted">
+                {document.contentPreview}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 
@@ -913,13 +1406,319 @@ function SnapshotTile({
   );
 }
 
+function IntakeView({
+  apiStatus,
+  isSubmitting,
+  onCreate
+}: {
+  apiStatus: ApiStatus;
+  isSubmitting: boolean;
+  onCreate: (
+    payload: CreateAppealPayload,
+    document?: AppealDocumentPayload
+  ) => Promise<void>;
+}) {
+  const isApiConnected = apiStatus === "connected";
+  const [form, setForm] = useState<IntakeFormState>({
+    member: "",
+    age: "",
+    policyNumber: "",
+    plan: "Commercial PPO",
+    provider: "",
+    service: "",
+    appealType: "Medical necessity",
+    urgency: "Standard",
+    denialReason: "",
+    appealArgument: ""
+  });
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
+  function updateField(field: keyof IntakeFormState, value: string) {
+    setForm((currentForm) => ({
+      ...currentForm,
+      [field]: value
+    }));
+  }
+
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setFileError(null);
+
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+
+    if (!isPdfFile(file)) {
+      setSelectedFile(null);
+      setFileError("Please add the appeal documents as a PDF.");
+      return;
+    }
+
+    setSelectedFile(file);
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const payload: CreateAppealPayload = {
+      ...form,
+      age: Number(form.age)
+    };
+    const document = selectedFile
+      ? {
+          file: selectedFile
+        }
+      : undefined;
+
+    await onCreate(payload, document);
+  }
+
+  return (
+    <section className="flex flex-col gap-5">
+      <PageHeader
+        eyebrow="Appeal Intake"
+        title="Create a new appeal"
+        description="Capture the appeal, add supporting documents, and open the review workspace with SLA and routing already assigned."
+      />
+
+      <form
+        className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_360px]"
+        onSubmit={handleSubmit}
+      >
+        <Panel
+          title="Appeal Details"
+          icon={FileText}
+          tooltip="Structured intake fields used to create the appeal case."
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Member
+              <input
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) => updateField("member", event.target.value)}
+                placeholder="Jordan M."
+                required
+                type="text"
+                value={form.member}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Age
+              <input
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                min={0}
+                onChange={(event) => updateField("age", event.target.value)}
+                placeholder="52"
+                required
+                type="number"
+                value={form.age}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Policy Number
+              <input
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) =>
+                  updateField("policyNumber", event.target.value)
+                }
+                placeholder="POL-91827364"
+                required
+                type="text"
+                value={form.policyNumber}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Plan
+              <select
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) => updateField("plan", event.target.value)}
+                value={form.plan}
+              >
+                <option>Commercial PPO</option>
+                <option>Medicare Advantage</option>
+                <option>Managed Medicaid</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Provider
+              <input
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) => updateField("provider", event.target.value)}
+                placeholder="Summit Specialty Clinic"
+                required
+                type="text"
+                value={form.provider}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink md:col-span-2">
+              Requested Service
+              <input
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) => updateField("service", event.target.value)}
+                placeholder="Lumbar epidural steroid injection"
+                required
+                type="text"
+                value={form.service}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Appeal Type
+              <select
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) =>
+                  updateField("appealType", event.target.value)
+                }
+                value={form.appealType}
+              >
+                <option>Medical necessity</option>
+                <option>Pharmacy exception</option>
+                <option>Level-of-care review</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink">
+              Urgency
+              <select
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-accent"
+                onChange={(event) =>
+                  updateField(
+                    "urgency",
+                    event.target.value as CreateAppealPayload["urgency"]
+                  )
+                }
+                value={form.urgency}
+              >
+                <option>Standard</option>
+                <option>Urgent</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink md:col-span-2">
+              Denial Reason
+              <textarea
+                className="min-h-[96px] rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium leading-6 text-ink outline-none transition focus:border-accent"
+                onChange={(event) =>
+                  updateField("denialReason", event.target.value)
+                }
+                placeholder="Summarize the denial reason from the notice."
+                required
+                value={form.denialReason}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-semibold text-ink md:col-span-2">
+              Appeal Argument
+              <textarea
+                className="min-h-[120px] rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium leading-6 text-ink outline-none transition focus:border-accent"
+                onChange={(event) =>
+                  updateField("appealArgument", event.target.value)
+                }
+                placeholder="Summarize the provider or member appeal argument."
+                required
+                value={form.appealArgument}
+              />
+            </label>
+          </div>
+        </Panel>
+
+        <div className="flex flex-col gap-4">
+          {!isApiConnected ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 shadow-soft">
+              <p className="flex items-center gap-2 font-semibold">
+                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                System connection required
+              </p>
+              <p className="mt-2 leading-5">
+                Start the local service at {API_BASE_URL} before creating a new
+                appeal.
+              </p>
+            </div>
+          ) : null}
+
+          <Panel
+            title="Appeal Documents"
+            icon={FileUp}
+            tooltip="Upload the PDF documents that will be attached to the new case."
+          >
+            <label
+              className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-accent/40 bg-surface px-4 py-8 text-center transition hover:border-accent"
+              htmlFor="appeal-document"
+            >
+              <FileUp className="h-8 w-8 text-accent" aria-hidden="true" />
+              <span className="text-sm font-semibold text-ink">
+                {selectedFile ? selectedFile.name : "Add appeal documents"}
+              </span>
+              {selectedFile ? (
+                <span className="text-xs font-medium text-muted">
+                  {formatFileSize(selectedFile.size)}
+                </span>
+              ) : (
+                <span className="text-xs font-medium text-muted">
+                  PDF required
+                </span>
+              )}
+              <input
+                accept="application/pdf,.pdf"
+                className="sr-only"
+                id="appeal-document"
+                onChange={handleFileChange}
+                required
+                type="file"
+              />
+            </label>
+            {fileError ? (
+              <p className="mt-2 text-sm font-semibold text-red-700">
+                {fileError}
+              </p>
+            ) : null}
+          </Panel>
+
+          <Panel
+            title="Review and create"
+            icon={Plus}
+            tooltip="Create the appeal and open the review workspace."
+          >
+            <div className="flex flex-col gap-3">
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted">
+                  Case Preview
+                </p>
+                <p className="mt-2 text-sm font-semibold text-ink">
+                  This will create a {form.urgency.toLowerCase()}{" "}
+                  {form.appealType.toLowerCase()} appeal
+                  {form.service ? ` for ${form.service}` : ""}.
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  {selectedFile
+                    ? `${selectedFile.name} will be reviewed by the AI workflow.`
+                    : "Add the appeal documents before creating the appeal."}
+                </p>
+              </div>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#0c6968] disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={isSubmitting || !selectedFile || !isApiConnected}
+                type="submit"
+              >
+                <Plus className="h-4 w-4" aria-hidden="true" />
+                {!isApiConnected
+                  ? "Start backend first"
+                  : isSubmitting
+                  ? "Creating..."
+                  : "Create appeal"}
+              </button>
+            </div>
+          </Panel>
+        </div>
+      </form>
+    </section>
+  );
+}
+
 function PolicyLibraryView() {
   return (
     <section className="flex flex-col gap-5">
       <PageHeader
         eyebrow="Decision Support"
         title="Policy and guideline library"
-        description="Mock policy snippets used by the demo to explain why HealthIntel marks criteria as met, partial, or missing."
+        description="Reference policy snippets used to explain why HealthIntel marks criteria as met, partial, or missing."
       />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -963,43 +1762,93 @@ function PolicyLibraryView() {
 function DecisionPanel({
   appeal,
   analysisReady,
+  isActionPending,
   isGenerating,
   onAction,
   onGenerate
 }: {
   appeal: AppealCase;
   analysisReady: boolean;
+  isActionPending: boolean;
   isGenerating: boolean;
-  onAction: (action: ReviewerAction) => void;
+  onAction: (action: ReviewerAction, note?: string) => void;
   onGenerate: () => void;
 }) {
+  const aiRecommendation = appeal.aiRecommendation;
+  const latestAuditEvent = appeal.audit.at(-1);
+  const actionLocked = Boolean(appeal.reviewerDecision);
+  const selectedAction =
+    appeal.reviewerDecision ?? aiRecommendation?.action ?? undefined;
+  const [requestInfoNote, setRequestInfoNote] = useState("");
+
+  useEffect(() => {
+    setRequestInfoNote("");
+  }, [appeal.id, appeal.reviewerDecision]);
+
   return (
     <aside className="flex flex-col gap-4">
       <Panel
-        title="Decision Assist"
+        title="Decision assist"
         icon={PanelRightOpen}
         tooltip="Reviewer support surface for draft recommendation and final action."
       >
         {analysisReady ? (
           <>
-            <div className="rounded-lg border border-accent/30 bg-[#eefaf9] p-3">
-              <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-accent">
-                <Bot className="h-4 w-4" aria-hidden="true" />
-                Draft Recommendation
-              </p>
-              <p className="mt-2 text-sm leading-6 text-slate-700">
-                {appeal.recommendation}
-              </p>
-            </div>
+            {aiRecommendation ? (
+              <div className="rounded-lg border border-accent/30 bg-[#eefaf9] p-3">
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-accent">
+                  <Bot className="h-4 w-4" aria-hidden="true" />
+                  AI recommendation
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Badge className={recommendationActionClass(aiRecommendation.action)}>
+                    {formatRecommendationAction(aiRecommendation.action)}
+                  </Badge>
+                  <Badge className="border-cyan-200 bg-white text-cyan-700">
+                    {aiRecommendation.confidence} confidence
+                  </Badge>
+                </div>
+                <p className="mt-3 text-sm leading-6 text-slate-700">
+                  {aiRecommendation.rationale}
+                </p>
+                <details className="mt-3 rounded-lg border border-cyan-200 bg-white p-3 text-sm text-slate-700">
+                  <summary className="cursor-pointer text-sm font-semibold text-accent">
+                    View support details
+                  </summary>
+                  <CompactDetailList
+                    items={aiRecommendation.supportingEvidence}
+                    title="Supports"
+                  />
+                  <CompactDetailList
+                    items={aiRecommendation.cautionNotes}
+                    title="Cautions"
+                  />
+                  <CompactDetailList
+                    items={aiRecommendation.complianceNotes}
+                    title="Compliance"
+                  />
+                </details>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-accent/30 bg-[#eefaf9] p-3">
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-accent">
+                  <Bot className="h-4 w-4" aria-hidden="true" />
+                  Draft recommendation
+                </p>
+                <p className="mt-2 text-sm leading-6 text-slate-700">
+                  {appeal.recommendation}
+                </p>
+              </div>
+            )}
 
             {appeal.reviewerDecision ? (
               <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
                 <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-emerald-700">
                   <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                  Saved Reviewer Action
+                  Saved reviewer action
                 </p>
                 <p className="mt-2 text-sm font-semibold text-emerald-900">
-                  {appeal.reviewerDecision}
+                  {formatRecommendationAction(appeal.reviewerDecision)}
                 </p>
                 <p className="mt-1 text-sm leading-5 text-emerald-800">
                   {appeal.decisionSummary}
@@ -1010,12 +1859,30 @@ function DecisionPanel({
               </div>
             ) : null}
 
+            {appeal.reviewerDecision && latestAuditEvent ? (
+              <div className="mt-3 rounded-lg border border-border bg-white p-3">
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted">
+                  <ListChecks className="h-4 w-4 text-accent" aria-hidden="true" />
+                  Latest audit update
+                </p>
+                <p className="mt-2 text-sm font-semibold text-ink">
+                  {latestAuditEvent.label}
+                </p>
+                <p className="mt-1 text-sm leading-5 text-slate-700">
+                  {latestAuditEvent.detail}
+                </p>
+                <p className="mt-2 text-xs font-medium text-muted">
+                  {latestAuditEvent.time}
+                </p>
+              </div>
+            ) : null}
+
             <div className="mt-4">
               <h3 className="text-sm font-semibold text-ink">
                 Missing or weak documentation
               </h3>
               <div className="mt-2 flex flex-col gap-2">
-                {appeal.missingDocs.map((doc) => (
+                {appeal.missingDocs.slice(0, 2).map((doc) => (
                   <div
                     className="flex items-center gap-2 rounded-lg border border-border bg-white p-2.5 text-sm text-slate-700"
                     key={doc}
@@ -1024,37 +1891,70 @@ function DecisionPanel({
                     {doc}
                   </div>
                 ))}
+                {appeal.missingDocs.length > 2 ? (
+                  <p className="text-xs font-semibold text-muted">
+                    +{appeal.missingDocs.length - 2} more available in the
+                    case evidence
+                  </p>
+                ) : null}
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-2">
+              {!actionLocked ? (
+                <label className="mb-1 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-950">
+                  Request details
+                  <textarea
+                    className="min-h-[84px] resize-none rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm font-medium leading-5 text-ink outline-none transition focus:border-amber-500"
+                    maxLength={1000}
+                    onChange={(event) => setRequestInfoNote(event.target.value)}
+                    placeholder="Optional: list exactly what documents or clarification are needed."
+                    value={requestInfoNote}
+                  />
+                </label>
+              ) : null}
               <ActionButton
-                active={appeal.reviewerDecision === "Approve"}
+                active={selectedAction === "Approve"}
+                disabled={isActionPending || actionLocked}
                 icon={Check}
                 label="Approve"
                 onClick={() => onAction("Approve")}
-                tone="primary"
               />
               <ActionButton
-                active={appeal.reviewerDecision === "Request Info"}
+                active={selectedAction === "Request Info"}
+                disabled={isActionPending || actionLocked}
                 icon={FileSearch}
                 label="Request Info"
-                onClick={() => onAction("Request Info")}
+                onClick={() =>
+                  onAction("Request Info", requestInfoNote.trim() || undefined)
+                }
               />
               <ActionButton
-                active={appeal.reviewerDecision === "Draft Uphold"}
+                active={selectedAction === "Draft Uphold"}
+                disabled={isActionPending || actionLocked}
                 icon={ArrowRight}
-                label="Draft Uphold"
+                label="Uphold denial"
                 onClick={() => onAction("Draft Uphold")}
               />
             </div>
+            {isActionPending ? (
+              <p className="mt-2 text-xs font-semibold text-muted">
+                Saving reviewer action...
+              </p>
+            ) : null}
+            {actionLocked && !isActionPending ? (
+              <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold leading-5 text-emerald-800">
+                Decision locked. A fresh follow-up document will reopen reviewer
+                actions and clear this saved decision.
+              </p>
+            ) : null}
           </>
         ) : (
           <div className="rounded-lg border border-dashed border-border bg-surface p-4 text-sm leading-6 text-muted">
             <p>
               {isGenerating
                 ? "Drafting recommendation and reviewer actions..."
-                : "Generate an AI review packet to populate decision support."}
+                : "Generate an AI review to summarize documents, evidence, and next steps."}
             </p>
             <button
               className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#0c6968]"
@@ -1063,20 +1963,20 @@ function DecisionPanel({
               type="button"
             >
               <Sparkles className="h-4 w-4" aria-hidden="true" />
-              {isGenerating ? "Generating..." : "Generate packet"}
+              {isGenerating ? "Generating..." : "Generate AI review"}
             </button>
           </div>
         )}
       </Panel>
 
       <Panel
-        title="Smart Routing"
+        title="Smart routing"
         icon={Route}
         tooltip="Suggested reviewer specialty based on service, risk, and policy domain."
       >
         <div className="rounded-lg border border-border bg-surface p-3">
           <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted">
-            Suggested Reviewer
+            Suggested reviewer
           </p>
           <p className="mt-2 text-lg font-semibold text-ink">{appeal.specialty}</p>
           <p className="mt-2 text-sm leading-6 text-muted">
@@ -1086,12 +1986,12 @@ function DecisionPanel({
       </Panel>
 
       <Panel
-        title="Audit Trail"
+        title="Audit trail"
         icon={ShieldCheck}
         tooltip="Time-stamped workflow events for compliance review."
       >
         <div className="flex flex-col gap-3">
-          {appeal.audit.map((event, eventIndex) => (
+          {[...appeal.audit].reverse().map((event, eventIndex) => (
             <div
               className="grid grid-cols-[18px_1fr] gap-3"
               key={`${event.time}-${event.label}-${eventIndex}`}
@@ -1126,11 +2026,11 @@ function AnalysisPlaceholder({
           <Sparkles className="h-7 w-7" aria-hidden="true" />
         </div>
         <h2 className="mt-4 text-xl font-semibold text-ink">
-          AI review packet pending
+          AI review not generated
         </h2>
         <p className="mt-2 text-sm leading-6 text-muted">
           Generate the structured case brief, extracted facts, guideline match,
-          recommendation, and compliance trail for this appeal.
+          recommendation, and compliance trail.
         </p>
         <button
           className="mt-5 inline-flex items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#0c6968] disabled:opacity-70"
@@ -1139,46 +2039,37 @@ function AnalysisPlaceholder({
           type="button"
         >
           <Sparkles className="h-4 w-4" aria-hidden="true" />
-          {isGenerating ? "Generating..." : "Generate packet"}
+          {isGenerating ? "Generating..." : "Generate AI review"}
         </button>
       </div>
     </div>
   );
 }
 
-function ExecutiveDashboard() {
-  return (
-    <section className="rounded-lg border border-border bg-panel p-4 shadow-soft">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">
-          Executive View
-        </p>
-        <h2 className="mt-1 text-lg font-semibold text-ink">
-          Operational impact snapshot
-        </h2>
-      </div>
+function CompactDetailList({
+  items,
+  title
+}: {
+  items: string[];
+  title: string;
+}) {
+  if (!items.length) {
+    return null;
+  }
 
-      <div className="mt-4 grid grid-cols-1 gap-3">
-        {impactMetrics.map((metric) => {
-          const Icon = metric.icon;
-          return (
-            <div
-              className="rounded-lg border border-border bg-surface p-4"
-              key={metric.label}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-muted">{metric.label}</p>
-                <Icon className="h-5 w-5 text-accent" aria-hidden="true" />
-              </div>
-              <p className="mt-3 text-3xl font-semibold text-ink">
-                {metric.value}
-              </p>
-              <p className="mt-1 text-sm text-muted">{metric.detail}</p>
-            </div>
-          );
-        })}
-      </div>
-    </section>
+  return (
+    <div className="mt-3">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+        {title}
+      </p>
+      <ul className="mt-2 flex flex-col gap-1.5">
+        {items.slice(0, 3).map((item) => (
+          <li className="text-sm leading-5 text-slate-700" key={item}>
+            {item}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -1358,133 +2249,147 @@ function Badge({
 
 function ActionButton({
   active = false,
+  disabled = false,
   icon,
   label,
-  onClick,
-  tone = "secondary"
+  onClick
 }: {
   active?: boolean;
+  disabled?: boolean;
   icon: LucideIcon;
   label: string;
   onClick: () => void;
-  tone?: "primary" | "secondary";
 }) {
   const Icon = icon;
   return (
     <button
+      aria-pressed={active}
       className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
         active
-          ? "border border-accent bg-[#eefaf9] text-accent"
-          : tone === "primary"
-          ? "bg-accent text-white hover:bg-[#0c6968]"
+          ? "border border-accent bg-accent text-white shadow-soft"
           : "border border-border bg-white text-ink hover:bg-surface"
-      }`}
+      } disabled:cursor-not-allowed disabled:opacity-60`}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
       <Icon className="h-4 w-4" aria-hidden="true" />
       {label}
+      {active ? (
+        <span className="rounded-full bg-white/20 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-normal text-white">
+          Selected
+        </span>
+      ) : null}
     </button>
   );
 }
 
-function createInitialAppeals() {
-  return cases.map((appeal) => ({
-    ...appeal,
-    status: appeal.status,
-    analysisPrepared: false,
-    reviewerDecision: undefined,
-    decisionSummary: undefined,
-    decisionTime: undefined,
-    facts: [...appeal.facts],
-    timeline: [...appeal.timeline],
-    approvalEvidence: [...appeal.approvalEvidence],
-    denialEvidence: [...appeal.denialEvidence],
-    guideline: [...appeal.guideline],
-    missingDocs: [...appeal.missingDocs],
-    audit: [...appeal.audit]
-  }));
+function isPdfFile(file: File) {
+  return (
+    file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
+  );
 }
 
-function prepareAppealPacket(appeal: AppealCase, caseId: string): AppealCase {
-  if (appeal.id !== caseId) {
-    return appeal;
+function formatFileSize(fileSize: number) {
+  if (fileSize < 1024) {
+    return `${fileSize} B`;
   }
 
-  if (appeal.analysisPrepared) {
-    return {
-      ...appeal,
-      status: appeal.reviewerDecision ? appeal.status : "AI triaged"
-    };
+  if (fileSize < 1024 * 1024) {
+    return `${(fileSize / 1024).toFixed(1)} KB`;
   }
 
-  return {
-    ...appeal,
-    analysisPrepared: true,
-    status: appeal.reviewerDecision ? appeal.status : "AI triaged",
-    audit: [
-      ...appeal.audit,
-      {
-        time: formatAuditTime(),
-        label: "AI classification completed",
-        detail: `${appeal.urgency} urgency, ${appeal.risk.toLowerCase()} risk, ${appeal.specialty} routing`
-      },
-      {
-        time: formatAuditTime(),
-        label: "Clinical facts extracted",
-        detail: `${appeal.facts.length} key facts, ${appeal.timeline.length} timeline events, ${appeal.missingDocs.length} missing-doc signals`
-      },
-      {
-        time: formatAuditTime(),
-        label: "Reviewer packet prepared",
-        detail:
-          "Decision brief, evidence map, recommendation, and guideline checklist generated."
+  return `${(fileSize / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatExtractionMode(mode: string | null | undefined) {
+  if (mode === "LLM") {
+    return "LLM extraction";
+  }
+
+  if (mode === "Rule-based") {
+    return "Document extraction";
+  }
+
+  return mode ?? "Document";
+}
+
+function formatRecommendationAction(action: ReviewerAction) {
+  if (action === "Draft Uphold") {
+    return "Uphold denial";
+  }
+
+  return action;
+}
+
+function compareAppealsForReviewQueue(first: AppealCase, second: AppealCase) {
+  const firstSequence = getAppealSequence(first.id);
+  const secondSequence = getAppealSequence(second.id);
+
+  if (firstSequence !== secondSequence) {
+    return secondSequence - firstSequence;
+  }
+
+  if (first.source === "Member portal" && second.source !== "Member portal") {
+    return -1;
+  }
+
+  if (second.source === "Member portal" && first.source !== "Member portal") {
+    return 1;
+  }
+
+  return first.id.localeCompare(second.id);
+}
+
+function getAppealSequence(appealId: string) {
+  const sequence = Number(appealId.split("-").at(-1));
+  return Number.isFinite(sequence) ? sequence : 0;
+}
+
+function recommendationActionClass(action: ReviewerAction) {
+  if (action === "Approve") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
+  if (action === "Request Info") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+
+  return "border-violet-200 bg-violet-50 text-violet-700";
+}
+
+function getDocumentSignals(appeal: AppealCase) {
+  const signals: string[] = [];
+
+  for (const document of appeal.documents ?? []) {
+    for (const signal of document.extractionSignals ?? []) {
+      if (!signals.includes(signal)) {
+        signals.push(signal);
       }
-    ]
-  };
-}
-
-function mergeAppealState(savedAppeals: AppealCase[]) {
-  if (!Array.isArray(savedAppeals)) {
-    return createInitialAppeals();
+    }
   }
 
-  return cases.map((baseAppeal) => {
-    const savedAppeal = savedAppeals.find((appeal) => appeal.id === baseAppeal.id);
-    return savedAppeal
-      ? {
-          ...baseAppeal,
-          ...savedAppeal,
-          analysisPrepared:
-            typeof savedAppeal.analysisPrepared === "boolean"
-              ? savedAppeal.analysisPrepared
-              : false,
-          audit: Array.isArray(savedAppeal.audit)
-            ? savedAppeal.audit
-            : baseAppeal.audit
-        }
-      : {
-          ...baseAppeal,
-          analysisPrepared: false,
-          audit: [...baseAppeal.audit]
-        };
-  });
+  return signals;
 }
 
-function formatAuditTime() {
-  const now = new Date();
-  const date = now.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  });
-  const time = now.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  });
+function getErrorMessage(error: unknown) {
+  return error instanceof Error
+    ? error.message
+    : "Something went wrong while calling HealthIntel.";
+}
 
-  return `${date} ${time}`;
+function isWithinPastDays(value: string | null | undefined, days: number) {
+  if (!value) {
+    return false;
+  }
+
+  const dateValue = new Date(value);
+  if (Number.isNaN(dateValue.getTime())) {
+    return true;
+  }
+
+  const elapsedMs = Date.now() - dateValue.getTime();
+  return elapsedMs >= 0 && elapsedMs <= days * 24 * 60 * 60 * 1000;
 }
 
 function formatNoticeTime() {

@@ -1,0 +1,7 @@
+# Runtime package and dependencies.
+-r requirements.txt
+
+# Test and lint dependencies.
+httpx>=0.27,<1.0
+pytest>=8.2,<9.0
+ruff>=0.5,<1.0

@@ -4,6 +4,7 @@ node_modules/
 # Next.js
 .next/
 out/
+*.tsbuildinfo
 
 # production
 dist/
@@ -12,12 +13,29 @@ build/
 # local env files
 .env
 .env*.local
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+backend/data/
+backend/logs/
+*.sqlite3
 
 # logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.next-dev*.log
 
 # OS/editor
 .DS_Store
